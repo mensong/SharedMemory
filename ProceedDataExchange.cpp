@@ -1,5 +1,9 @@
+//#include "pch.h"
+//#include "stdafx.h"
 #include "ProceedDataExchange.h"
 
+const size_t MEMORY_REDUNDANCE = 100;
+const size_t BUFFER_AND_ARRAYLEN_SPLIT = 50;
 
 ProceedDataExchange::ProceedDataExchange(const TCHAR memoryName[], long int memorySize, BOOL bGlobal/* = FALSE*/)
 	: hMapFile(NULL)
@@ -20,7 +24,7 @@ ProceedDataExchange::ProceedDataExchange(const TCHAR memoryName[], long int memo
 		lstrcat(szMemoryName, TEXT("Local\\"));
 	lstrcat(szMemoryName, memoryName);
 
-	long int bufferSize = memorySize + 100;
+	long int bufferSize = memorySize + MEMORY_REDUNDANCE;
 	//CreateFileMapping
 	hMapFile = CreateFileMapping(
 		INVALID_HANDLE_VALUE,    // use paging file
@@ -61,7 +65,7 @@ ProceedDataExchange::ProceedDataExchange(const TCHAR memoryName[], long int memo
 	if (WAIT_OBJECT_0 == result)
 	{
 		long int length = 0;
-		memcpy((PVOID)memoryPBuf, &length, 4);
+		memcpy((PVOID)memoryPBuf, &length, sizeof(length));
 	}
 
 	//Write and Read Lock initial-------------------------------------------------------------
@@ -85,7 +89,8 @@ ProceedDataExchange::ProceedDataExchange(const TCHAR memoryName[], long int memo
 		printf("Create File Mapping WRLock error:%d\n", e);
 		return;
 	}
-	memoryPBufWRLock = (LPTSTR)MapViewOfFile(hMapFileWRLock,   // handle to map object
+	memoryPBufWRLock = (LPTSTR)MapViewOfFile(
+		hMapFileWRLock,   // handle to map object
 		FILE_MAP_ALL_ACCESS, // read/write permission
 		0,
 		0,
@@ -162,102 +167,86 @@ bool ProceedDataExchange::isValid()
 		&& memoryPBufWRLock;
 }
 
-int ProceedDataExchange::writePackage(const void* PData, long int dataSize, long int dataID, BOOL block)
+ProceedDataExchange::RESULT ProceedDataExchange::writeData(
+	const void* pData, long int dataSize, long int dataID, BOOL block)
 {
-	unsigned char newDataFlag = 1;
-	long int dataOffsetIndex = 0;
-	long int dataOffset = 0;
 	//=============ask for write lock===================
 	if (0 == askWriteLock(block))
 	{
 		return ASKFORWRITEFAIL;
 	}
-	//get data length
-	memcpy(&dataInform.arrayLen, (PVOID)memoryPBuf, 4);
-	//get data offset
-	for (int i = 0; i < dataInform.arrayLen; i++)
-	{
-		memcpy(&dataInform.dataOffset[i], (PVOID)(memoryPBuf + 4 + 4 * i), 4);
-	}
-	//get data ID
-	for (int i = 0; i < dataInform.arrayLen; i++)
-	{
-		memcpy(&dataInform.dataID[i], (PVOID)(memoryPBuf + 50 + 4 * i), 4);
-		if (dataInform.dataID[i] == dataID && dataInform.dataOffset[i] == dataSize)
-		{
-			newDataFlag = 0;
-			dataOffsetIndex = i;
-		}
-		if (newDataFlag == 1)
-		{
-			dataOffset += dataInform.dataOffset[i];
-		}
-	}
-	if (newDataFlag == 1)
-	{
-		dataInform.dataID[dataInform.arrayLen] = dataID;
-		dataInform.dataOffset[dataInform.arrayLen] = dataSize;
-		dataInform.arrayLen++;
-		memcpy((PVOID)(memoryPBuf + dataOffset + 100), PData, dataSize);
-		memcpy((PVOID)memoryPBuf, &dataInform.arrayLen, 4);
-		memcpy((PVOID)(memoryPBuf + 4 * dataInform.arrayLen), &dataInform.dataOffset[dataInform.arrayLen - 1], 4);
-		memcpy((PVOID)(memoryPBuf + 50 + 4 * (dataInform.arrayLen - 1)), &dataInform.dataID[dataInform.arrayLen - 1], 4);
 
-		unLockWriteLock();
-		return NEWDATA;
-	}
-	else
-	{
-		memcpy((PVOID)(memoryPBuf + dataOffset + 100), PData, dataSize);
+	ProceedDataExchange::RESULT res = rawWriteData(pData, dataSize, dataID);
 
-		unLockWriteLock();
-		return EXISTDATA;
-	}
+	unLockWriteLock();
 
+	return res;
 }
 
-int ProceedDataExchange::readPackage(void* PData, long int dataSize, long int dataID, BOOL block)
+ProceedDataExchange::RESULT ProceedDataExchange::readData(
+	void* outData, long int dataSize, long int dataID, BOOL block)
 {
-	unsigned char newDataFlag = 1;
-	long int dataOffsetIndex = 0;
-	long int dataOffset = 0;
+	//=============ask for write lock===================
 	if (0 == askReadLock(block))
 	{
 		return ASKFORREADFAIL;
 	}
-	//get data length
-	memcpy(&dataInform.arrayLen, (PVOID)memoryPBuf, 4);
-	//get data offset
-	for (int i = 0; i < dataInform.arrayLen; i++)
+	
+	ProceedDataExchange::RESULT res = rawReadData(outData, dataSize, dataID);
+
+	unLockReadLock();
+
+	return res;
+}
+
+ProceedDataExchange::RESULT ProceedDataExchange::atomReadWriteData(
+	void* pReadData, const void* pWriteData, 
+	long int dataSize, long int dataID, BOOL block)
+{
+	//=============ask for write lock===================
+	if (0 == askReadLock(block))
 	{
-		memcpy(&dataInform.dataOffset[i], (PVOID)(memoryPBuf + 4 + 4 * i), 4);
+		return ASKFORREADFAIL;
 	}
-	//get data ID
-	for (int i = 0; i < dataInform.arrayLen; i++)
-	{
-		memcpy(&dataInform.dataID[i], (PVOID)(memoryPBuf + 50 + 4 * i), 4);
-		if (dataInform.dataID[i] == dataID && dataInform.dataOffset[i] == dataSize)
-		{
-			newDataFlag = 0;
-			dataOffsetIndex = i;
-			break;
-		}
-		if (newDataFlag == 1)
-		{
-			dataOffset += dataInform.dataOffset[i];
-		}
-	}
-	if (newDataFlag == 1)
-	{
-		unLockReadLock();
-		return NOEXISTDATA;
-	}
-	else
-	{
-		memcpy(PData, (PVOID)(memoryPBuf + dataOffset + 100), dataSize);
-		unLockReadLock();
-		return EXISTDATA;
-	}
+
+	ProceedDataExchange::RESULT res = rawReadData(pReadData, dataSize, dataID);
+	    res = rawWriteData(pWriteData, dataSize, dataID);
+
+	unLockReadLock();
+
+	return res;
+}
+
+ProceedDataExchange::RESULT ProceedDataExchange::writePackage(
+	const void* pData, long int dataSize, long int dataID, BOOL block)
+{
+	if (0 == askReadLock(block))
+		return ASKFORREADFAIL;
+
+	long int dataIDSize = dataID * 2;
+	ProceedDataExchange::RESULT res = rawWriteData(&dataSize, sizeof(dataSize), dataIDSize);
+	if (res >= 0)
+		res = rawWriteData(pData, dataSize, dataIDSize + 1);
+
+	unLockReadLock();
+
+	return res;
+}
+
+ProceedDataExchange::RESULT ProceedDataExchange::readPackage(
+	void* outData, long int& outDataSize, long int dataID, BOOL block)
+{
+	if (0 == askReadLock(block))
+		return ASKFORREADFAIL;
+
+	long int dataIDSize = dataID * 2;
+	ProceedDataExchange::RESULT res = rawReadData(&outDataSize, sizeof(outDataSize), dataIDSize);
+	if (res >= 0)
+		res = rawReadData(outData, outDataSize, dataIDSize + 1);
+
+	unLockReadLock();
+
+	return res;
 }
 
 int ProceedDataExchange::askWriteLock(BOOL block)
@@ -334,6 +323,98 @@ void ProceedDataExchange::unLockReadLock(void)
 
 	SetEvent(hEventWRLock);
 	ResetEvent(hEventWRLock);
+}
+
+ProceedDataExchange::RESULT ProceedDataExchange::rawWriteData(const void* pData, long int dataSize, long int dataID)
+{
+	unsigned char newDataFlag = 1;
+	long int dataOffsetIndex = 0;
+	long int dataOffset = 0;
+	//get data length
+	memcpy(&dataInform.arrayLen, (PVOID)memoryPBuf, sizeof(dataInform.arrayLen));
+	//get data offset
+	for (int i = 0; i < dataInform.arrayLen; i++)
+	{
+		memcpy(&dataInform.dataOffset[i],
+			(PVOID)(memoryPBuf + sizeof(dataInform.arrayLen) + sizeof(dataInform.dataOffset[i]) * i),
+			sizeof(dataInform.dataOffset[i]));
+	}
+	//get data ID
+	for (int i = 0; i < dataInform.arrayLen; i++)
+	{
+		memcpy(&dataInform.dataID[i],
+			(PVOID)(memoryPBuf + BUFFER_AND_ARRAYLEN_SPLIT + sizeof(dataInform.dataID[i]) * i),
+			sizeof(dataInform.dataID[i]));
+		if (dataInform.dataID[i] == dataID && dataInform.dataOffset[i] == dataSize)
+		{
+			newDataFlag = 0;
+			dataOffsetIndex = i;
+		}
+		if (newDataFlag == 1)
+		{
+			dataOffset += dataInform.dataOffset[i];
+		}
+	}
+	if (newDataFlag == 1)
+	{
+		dataInform.dataID[dataInform.arrayLen] = dataID;
+		dataInform.dataOffset[dataInform.arrayLen] = dataSize;
+		dataInform.arrayLen++;
+		memcpy((PVOID)(memoryPBuf + dataOffset + MEMORY_REDUNDANCE), pData, dataSize);
+		memcpy((PVOID)memoryPBuf, &dataInform.arrayLen, sizeof(dataInform.arrayLen));
+		memcpy((PVOID)(memoryPBuf + sizeof(dataInform.dataOffset[dataInform.arrayLen - 1]) * dataInform.arrayLen),
+			&dataInform.dataOffset[dataInform.arrayLen - 1], sizeof(dataInform.dataOffset[dataInform.arrayLen - 1]));
+		memcpy((PVOID)(memoryPBuf + BUFFER_AND_ARRAYLEN_SPLIT + sizeof(dataInform.dataID[dataInform.arrayLen - 1]) * (dataInform.arrayLen - 1)),
+			&dataInform.dataID[dataInform.arrayLen - 1], sizeof(dataInform.dataID[dataInform.arrayLen - 1]));
+
+		return NEWDATA;
+	}
+	else
+	{
+		memcpy((PVOID)(memoryPBuf + dataOffset + MEMORY_REDUNDANCE), pData, dataSize);
+		return EXISTDATA;
+	}
+}
+
+ProceedDataExchange::RESULT ProceedDataExchange::rawReadData(void* pData, long int dataSize, long int dataID)
+{
+	unsigned char newDataFlag = 1;
+	long int dataOffsetIndex = 0;
+	long int dataOffset = 0;
+	//get data length
+	memcpy(&dataInform.arrayLen, (PVOID)memoryPBuf, sizeof(dataInform.arrayLen));
+	//get data offset
+	for (int i = 0; i < dataInform.arrayLen; i++)
+	{
+		memcpy(&dataInform.dataOffset[i], (PVOID)(memoryPBuf + sizeof(dataInform.arrayLen) + sizeof(dataInform.dataOffset[i]) * i),
+			sizeof(dataInform.dataOffset[i]));
+	}
+	//get data ID
+	for (int i = 0; i < dataInform.arrayLen; i++)
+	{
+		memcpy(&dataInform.dataID[i],
+			(PVOID)(memoryPBuf + BUFFER_AND_ARRAYLEN_SPLIT + sizeof(dataInform.dataID[i]) * i),
+			sizeof(dataInform.dataID[i]));
+		if (dataInform.dataID[i] == dataID && dataInform.dataOffset[i] == dataSize)
+		{
+			newDataFlag = 0;
+			dataOffsetIndex = i;
+			break;
+		}
+		if (newDataFlag == 1)
+		{
+			dataOffset += dataInform.dataOffset[i];
+		}
+	}
+	if (newDataFlag == 1)
+	{
+		return NOEXISTDATA;
+	}
+	else
+	{
+		memcpy(pData, (PVOID)(memoryPBuf + dataOffset + MEMORY_REDUNDANCE), dataSize);
+		return EXISTDATA;
+	}
 }
 
 void ProceedDataExchange::release()

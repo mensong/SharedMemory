@@ -25,7 +25,7 @@ int main(int argc, char** argv)
 		{
 			size_t randoxNumber = 1 + rand() % (100000 - 1);
 			memcpy(data, &randoxNumber, sizeof(size_t));
-			int res = shm.writePackage(data, sizeof(size_t), 1, TRUE);
+			int res = shm.writeData(data, sizeof(size_t), 1, TRUE);
 			std::cout << "write:" << randoxNumber << "\n";
 		}
 	}
@@ -34,7 +34,7 @@ int main(int argc, char** argv)
 		while (true)
 		{
 			size_t data = 0;
-			int res = shm.readPackage(&data, sizeof(size_t), 1, TRUE);
+			int res = shm.readData(&data, sizeof(size_t), 1, TRUE);
 			std::cout << "read:" << data << "\n";
 		}
 	}
